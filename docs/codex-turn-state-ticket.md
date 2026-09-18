@@ -1,7 +1,7 @@
 # x-codex-turn-state 门票（292 打票）
 
 对 ChatGPT OAuth 账号的门控模型（默认 `gpt-6-astra`、`gpt-5.6-sol`），上游要求请求携带
-`x-codex-turn-state` 回执（292 字符、`gAAAAA` 前缀）。本功能在后台自动「打票」：
+`x-codex-turn-state` 回执（`gAAAAA` 前缀，长度按模型：astra 292 / sol 312）。本功能在后台自动「打票」：
 用账号身份、经专用打票代理、模拟官方 Codex CLI 发最小探测请求，从**响应头**捕获门票，
 存入内存缓存与 `accounts.extra`（键前缀 `codex_turn_ticket:`），并在业务请求出站时注入该头。
 
@@ -30,6 +30,9 @@
 
 - **探测节奏**：默认每 6 秒一个检查周期；某 (账号,模型) 已有有效且未临近过期（默认到期前
   10 分钟）的票则跳过。TTL 默认 3600 秒，即每账号每模型约 1 发/50 分钟。
+- **长度指纹按模型**：`openAICodexTicketModelTargetLengths` 记录各门控模型实测的期望长度
+  （gpt-6-astra=292、gpt-5.6-sol=312，2026-09-19 线上实测）；未收录模型退回全局
+  `target_length`。上游若改长度，表现为持续 miss，需更新该表。
 - **并发上限**：单周期最多 8 个并发外呼（`openAICodexTicketMaxConcurrentProbes`），
   避免大量账号无票时瞬间打满代理出口。
 - **连败退避**：打不到票（token 失败/网络错误/非 200/长度不合格）的 key 按 30s 起步、

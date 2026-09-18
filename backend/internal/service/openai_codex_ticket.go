@@ -41,7 +41,6 @@ type openAICodexTicket struct {
 	Length     int       `json:"length"`
 	CapturedAt time.Time `json:"captured_at"`
 	ExpiresAt  time.Time `json:"expires_at"`
-	Attempts   int       `json:"attempts"`
 }
 
 func openAICodexTicketKey(accountID int64, model string) string {
@@ -50,6 +49,64 @@ func openAICodexTicketKey(accountID int64, model string) string {
 
 func openAICodexTicketExtraKey(model string) string {
 	return openAICodexTicketExtraKeyPrefix + strings.TrimSpace(model)
+}
+
+const (
+	// openAICodexTicketMaxConcurrentProbes 限制单周期并发外呼。无票账号很多时
+	// （如 300 号 × 2 模型）一次性全打出去会瞬间打满代理出口，且每发探测
+	// 都是一次真实账号请求，必须限流。
+	openAICodexTicketMaxConcurrentProbes = 8
+	// 打不到票的 (账号,模型) 按连败次数指数退避（30s 起步、每败翻倍、封顶
+	// 15 分钟），避免每个周期都空转重试、反复触发 GetAccessToken。
+	openAICodexTicketProbeBackoffBase     = 30 * time.Second
+	openAICodexTicketProbeBackoffMax      = 15 * time.Minute
+	openAICodexTicketProbeBackoffShiftCap = 6
+)
+
+// openAICodexTicketProbeThrottle 记录某 (账号,模型) 的连败退避状态。
+type openAICodexTicketProbeThrottle struct {
+	mu       sync.Mutex
+	failures int
+	next     time.Time
+}
+
+func openAICodexTicketProbeThrottled(raw any, now time.Time) bool {
+	t, _ := raw.(*openAICodexTicketProbeThrottle)
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return now.Before(t.next)
+}
+
+// markOpenAICodexTicketProbeResult 命中则清零退避；未命中按连败次数记录
+// 下一次允许探测的时间，refresh 周期据此跳过。
+func (s *OpenAIGatewayService) markOpenAICodexTicketProbeResult(key string, harvested bool) {
+	if s == nil {
+		return
+	}
+	if harvested {
+		s.openaiCodexTicketProbeThrottle.Delete(key)
+		return
+	}
+	raw, _ := s.openaiCodexTicketProbeThrottle.LoadOrStore(key, &openAICodexTicketProbeThrottle{})
+	t, _ := raw.(*openAICodexTicketProbeThrottle)
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.failures++
+	shift := t.failures - 1
+	if shift > openAICodexTicketProbeBackoffShiftCap {
+		shift = openAICodexTicketProbeBackoffShiftCap
+	}
+	backoff := openAICodexTicketProbeBackoffBase * time.Duration(1<<shift)
+	if backoff > openAICodexTicketProbeBackoffMax {
+		backoff = openAICodexTicketProbeBackoffMax
+	}
+	t.next = time.Now().Add(backoff)
 }
 
 func normalizeOpenAICodexTicketModel(model string) string {
@@ -226,14 +283,12 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 	if mem.valid(now, targetLen) {
 		return mem
 	}
-	if extra != nil {
-		s.openaiCodexTickets.Store(key, extra)
-		return extra
-	}
+	// 两源都缺失或已失效：清掉缓存残留后直接返回 extra（调用方一律用
+	// valid() 复核，失效票与 nil 等价），不再把失效票回写缓存。
 	if mem != nil {
 		s.openaiCodexTickets.Delete(key)
 	}
-	return nil
+	return extra
 }
 
 func parseOpenAICodexTicketFromAny(accountID int64, model string, raw any) *openAICodexTicket {
@@ -477,8 +532,8 @@ func (s *OpenAIGatewayService) openAICodexTicketHarvestLoop(ctx context.Context)
 }
 
 // refreshOpenAICodexTickets probes each account/model with a missing or soon-to-expire
-// ticket once. The loop waits for all probes, then waits the configured interval
-// before starting the next cycle.
+// ticket once, with a concurrency cap and per-key backoff for repeated misses. The
+// loop waits for all probes, then waits the configured interval before the next cycle.
 func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	if s == nil || s.accountRepo == nil || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
 		return
@@ -491,8 +546,11 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	cfg := s.openAICodexTicketConfig()
 	now := time.Now()
 	refreshBefore := time.Duration(cfg.RefreshBeforeSeconds) * time.Second
+	// 并发上限：无票 (账号,模型) 很多时不能一次性全部外呼，否则会瞬间
+	// 打满打票代理出口，且每发探测都是一次真实账号请求。
+	sem := make(chan struct{}, openAICodexTicketMaxConcurrentProbes)
 	var wg sync.WaitGroup
-	probed := 0
+	probed, throttled := 0, 0
 	for i := range accounts {
 		account := accounts[i]
 		if account.Status != StatusActive || !isOpenAICodexTicketAccount(&account) {
@@ -507,37 +565,48 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, cfg.TargetLength) && !t.needsRefresh(now, refreshBefore) {
 				continue
 			}
+			key := openAICodexTicketKey(account.ID, model)
+			// 连败退避期内 → 本周期跳过，避免每 ~6s 空转重试。
+			throttledValue, _ := s.openaiCodexTicketProbeThrottle.Load(key)
+			if openAICodexTicketProbeThrottled(throttledValue, now) {
+				throttled++
+				continue
+			}
 			acc := account
 			// Token/header helpers may update account metadata; each model owns its maps.
 			acc.Extra = maps.Clone(account.Extra)
 			acc.Credentials = maps.Clone(account.Credentials)
 			probed++
 			wg.Add(1)
-			go func(acc Account, model string) {
+			go func(acc Account, model, key string) {
 				defer wg.Done()
-				s.probeOnceOpenAICodexTicket(ctx, &acc, model)
-			}(acc, model)
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				s.markOpenAICodexTicketProbeResult(key, s.probeOnceOpenAICodexTicket(ctx, &acc, model))
+			}(acc, model, key)
 		}
 	}
 	wg.Wait()
-	if probed > 0 {
-		logger.L().Info("openai_codex_ticket probe cycle", zap.Int("probed", probed))
+	if probed > 0 || throttled > 0 {
+		logger.L().Info("openai_codex_ticket probe cycle",
+			zap.Int("probed", probed), zap.Int("throttled", throttled))
 	}
 }
 
 // probeOnceOpenAICodexTicket 走打票代理打一发。命中合格 292（HTTP 200、长度==target、
-// gAAAAA 前缀）就落库；否则记 Info miss，交给下个周期重试。同一 key 并发去重，避免上一发还没
-// 回来又叠一发。
-func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) {
+// gAAAAA 前缀）就落库并返回 true；否则记 Info miss 返回 false，交给下个周期
+// （受连败退避节制）重试。同一 key 并发去重，避免上一发还没回来又叠一发。
+func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) bool {
 	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
-		return
+		return false
 	}
 	cfg := s.openAICodexTicketConfig()
 	proxyURL := s.openAICodexTicketHarvestProxyURLContext(ctx)
 	if proxyURL == "" || s.httpUpstream == nil || ctx.Err() != nil {
-		return
+		return false
 	}
 	key := openAICodexTicketKey(account.ID, model)
+	harvested := false
 	_, _, _ = s.openaiCodexTicketFlight.Do(key, func() (any, error) {
 		token, _, err := s.GetAccessToken(ctx, account)
 		if err != nil || strings.TrimSpace(token) == "" {
@@ -567,14 +636,15 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 			Length:     len(state),
 			CapturedAt: now,
 			ExpiresAt:  now.Add(time.Duration(cfg.TTLSeconds) * time.Second),
-			Attempts:   1,
 		}
 		s.storeOpenAICodexTicket(ctx, account, ticket)
+		harvested = true
 		logger.L().Info("openai_codex_ticket harvested",
 			zap.Int64("account_id", account.ID), zap.String("model", model),
 			zap.Int("length", ticket.Length), zap.String("mode", "continuous"))
 		return nil, nil
 	})
+	return harvested
 }
 
 // IsOpenAICodexTicketExtraKey identifies server-managed ticket material.
@@ -643,6 +713,10 @@ func MaskProxyURL(raw string) string {
 	return parsed.String()
 }
 
+// OpenAICodexTicketHarvestProxyClearSentinel 是后台保存该值时表示「清除已保存
+// 的打票代理」的哨兵；空串按既有约定表示「保持原值」不变。
+const OpenAICodexTicketHarvestProxyClearSentinel = "none"
+
 // IsMaskedProxyURL recognizes the exact password placeholder emitted by the API.
 func IsMaskedProxyURL(raw string) bool {
 	raw = strings.TrimSpace(raw)
@@ -657,10 +731,12 @@ func IsMaskedProxyURL(raw string) bool {
 	return ok && password == "***"
 }
 
-// Credential shadows do not own tickets. Keep their existing forwarding policy
-// instead of imposing a gate for a key the harvester never populates.
+// isOpenAICodexTicketAccount 限定门票功能只作用于「已确认付费套餐」的 ChatGPT
+// OAuth 账号（plan_type 非 free/空/abnormal，由 OAuth 刷新自动保鲜）。免费号、
+// 未知套餐号与 SetupToken 号既不打票探测、也不做 fail-closed 拦截，避免对不可能
+// 出票的账号持续外呼。Credential shadows 不拥有门票，继续豁免并保持原有转发策略。
 func isOpenAICodexTicketAccount(account *Account) bool {
-	return account != nil && account.IsOpenAIOAuthLike() && !account.IsShadow()
+	return account != nil && !account.IsShadow() && account.IsOpenAIChatGPTSubscription()
 }
 
 // IsOpenAICodexTicketPrivateExtraKey also covers the retired account-level proxy

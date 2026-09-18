@@ -26,7 +26,7 @@ func ticketTestAccount(id int64) *Account {
 		ID:          id,
 		Platform:    PlatformOpenAI,
 		Type:        AccountTypeOAuth,
-		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1"},
+		Credentials: map[string]any{"access_token": "tok", "chatgpt_account_id": "acc-1", "plan_type": "plus"},
 	}
 }
 
@@ -298,6 +298,44 @@ func TestLookupOpenAICodexTicket_HydratesFromExtra(t *testing.T) {
 	require.True(t, got.valid(time.Now(), 292))
 }
 
+func TestOpenAICodexTicket_FreePlanAccountFullyExempt(t *testing.T) {
+	cfg := config.OpenAICodexTicketConfig{
+		Enabled: true, FailClosed: true, HarvestProxyURL: "http://proxy.example.com:8080",
+		Models: []string{"gpt-6-astra"}, TargetLength: 292,
+	}
+	upstream := &codexTicketAlwaysMissUpstream{}
+	svc := ticketTestService(t, cfg, upstream)
+
+	// free / 空（未知）/ abnormal：完全豁免；team（付费）：照常门控。
+	for _, plan := range []string{"free", "", "abnormal", "team"} {
+		account := ticketTestAccount(50)
+		account.Status = StatusActive
+		account.Credentials["plan_type"] = plan
+		expectGated := plan == "team"
+		require.Equal(t, expectGated, svc.openAICodexTicketBlocksAccount(account, "gpt-6-astra"), "plan=%q", plan)
+		headers := http.Header{}
+		err := svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", headers)
+		if expectGated {
+			require.ErrorIs(t, err, ErrOpenAICodexTicketUnavailable, "plan=%q", plan)
+		} else {
+			require.NoError(t, err, "plan=%q", plan)
+			require.Empty(t, headers.Get(openAICodexTurnStateHeader), "plan=%q", plan)
+		}
+		require.Equal(t, expectGated, OpenAICodexTicketStatuses(account, cfg, time.Now()) != nil, "plan=%q", plan)
+	}
+
+	// 免费号/未知套餐号不进探测循环：refresh 零外呼。
+	free := ticketTestAccount(51)
+	free.Status = StatusActive
+	free.Credentials["plan_type"] = "free"
+	unknown := ticketTestAccount(52)
+	unknown.Status = StatusActive
+	delete(unknown.Credentials, "plan_type")
+	svc.accountRepo = &codexTicketRefreshRepo{accounts: []Account{*free, *unknown}}
+	svc.refreshOpenAICodexTickets(context.Background())
+	require.Zero(t, upstream.started.Load())
+}
+
 func TestOpenAICodexTicketStatuses_ReportsRemainingTTL(t *testing.T) {
 	account := ticketTestAccount(41)
 	account.Extra = map[string]any{
@@ -389,6 +427,47 @@ func TestRefreshOpenAICodexTickets_ConcurrentModelsPreserveAccountSnapshot(t *te
 	svc.refreshOpenAICodexTickets(context.Background())
 	require.Equal(t, int64(2), upstream.started.Load())
 }
+
+type codexTicketAlwaysMissUpstream struct {
+	HTTPUpstream
+	started atomic.Int64
+}
+
+func (u *codexTicketAlwaysMissUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	u.started.Add(1)
+	return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"overloaded"}`))}, nil
+}
+
+func TestRefreshOpenAICodexTickets_MissBackoffThrottlesNextCycle(t *testing.T) {
+	account := ticketTestAccount(41)
+	account.Status = StatusActive
+	repo := &codexTicketRefreshRepo{accounts: []Account{*account}}
+	upstream := &codexTicketAlwaysMissUpstream{}
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{Enabled: true, HarvestProxyURL: "socks5h://proxy.example.com:1080"}, upstream)
+	svc.accountRepo = repo
+
+	// 首轮：两个模型各打一发，全部 miss。
+	svc.refreshOpenAICodexTickets(context.Background())
+	require.Equal(t, int64(2), upstream.started.Load())
+	require.Empty(t, repo.updates)
+
+	// 连败退避期内：第二周期跳过，不再外呼。
+	svc.refreshOpenAICodexTickets(context.Background())
+	require.Equal(t, int64(2), upstream.started.Load())
+
+	// 退避窗口过期后恢复探测。
+	svc.openaiCodexTicketProbeThrottle.Range(func(_, v any) bool {
+		th, ok := v.(*openAICodexTicketProbeThrottle)
+		require.True(t, ok)
+		th.mu.Lock()
+		th.next = time.Now().Add(-time.Second)
+		th.mu.Unlock()
+		return true
+	})
+	svc.refreshOpenAICodexTickets(context.Background())
+	require.Equal(t, int64(4), upstream.started.Load())
+}
+
 func TestOpenAICodexTicketStatuses_RespectRuntimeConfiguration(t *testing.T) {
 	account := ticketTestAccount(41)
 	require.Empty(t, OpenAICodexTicketStatuses(account, config.OpenAICodexTicketConfig{}, time.Now()))

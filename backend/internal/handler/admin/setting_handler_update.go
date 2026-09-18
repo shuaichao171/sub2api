@@ -1778,6 +1778,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		}(),
 		OpenAICodexTicketHarvestProxyURL: func() string {
 			next := strings.TrimSpace(req.OpenAICodexTicketHarvestProxyURL)
+			// 显式哨兵：清除已保存的代理（空串按既有约定表示保持原值）。
+			if strings.EqualFold(next, service.OpenAICodexTicketHarvestProxyClearSentinel) {
+				return ""
+			}
 			if service.IsMaskedProxyURL(next) {
 				return previousSettings.OpenAICodexTicketHarvestProxyURL
 			}

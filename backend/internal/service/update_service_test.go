@@ -49,6 +49,13 @@ func (s *updateServiceGitHubClientStub) FetchChecksumFile(context.Context, strin
 	panic("FetchChecksumFile should not be called when no update is available")
 }
 
+// forkGuard: the in-app updater must always target this fork. If an upstream
+// sync reverts githubRepo to Wei-Shaw/sub2api, updates would silently pull
+// upstream binaries again — fail loudly instead.
+func TestUpdateServiceGitHubRepoPointsToFork(t *testing.T) {
+	require.Equal(t, "shuaichao171/sub2api", githubRepo)
+}
+
 func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 	svc := NewUpdateService(
 		&updateServiceCacheStub{},

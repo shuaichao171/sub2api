@@ -30,8 +30,8 @@ const (
 	openAICodexTicketDefaultSolModel = "gpt-5.6-sol"
 )
 
-// ErrOpenAICodexTicketUnavailable 表示该号该模型没有可用门票（长度指纹按模型，
-// 见 openAICodexTicketModelTargetLengths），且 fail_closed 禁止裸打业务请求。
+// ErrOpenAICodexTicketUnavailable 表示该号该模型没有可用门票（长度按区间校验，
+// 见 openAICodexTicketLengthOK），且 fail_closed 禁止裸打业务请求。
 var ErrOpenAICodexTicketUnavailable = errors.New("codex turn-state ticket unavailable")
 
 type openAICodexTicket struct {
@@ -63,23 +63,17 @@ const (
 	openAICodexTicketProbeBackoffShiftCap = 6
 )
 
-// openAICodexTicketModelTargetLengths 记录各门控模型实测的 turn-state 长度。
-// 长度是「捕获到正确凭据」的指纹校验：gpt-6-astra 实测 292；gpt-5.6-sol 实测
-// 312（2026-09-19 线上探测，两次一致）。未收录模型退回全局 TargetLength。
-var openAICodexTicketModelTargetLengths = map[string]int{
-	"gpt-6-astra": 292,
-	"gpt-5.6-sol": 312,
-}
+// 门票长度合理区间。长度本质是 Fernet 密文 base64 的长度，随上游 payload
+// 变化（同日内已观测 292 与 312 两种，均为有效票），因此用区间校验代替
+// 精确匹配，避免上游调整长度后全网持续 miss。
+const (
+	openAICodexTicketMinLength = 200
+	openAICodexTicketMaxLength = 512
+)
 
-// openAICodexTicketTargetLength 返回该模型的期望门票长度；未收录时用全局值。
-func openAICodexTicketTargetLength(cfg config.OpenAICodexTicketConfig, model string) int {
-	if n, ok := openAICodexTicketModelTargetLengths[normalizeOpenAICodexTicketModel(model)]; ok && n > 0 {
-		return n
-	}
-	if cfg.TargetLength > 0 {
-		return cfg.TargetLength
-	}
-	return 292
+// openAICodexTicketLengthOK 校验门票长度是否落在合理区间。
+func openAICodexTicketLengthOK(n int) bool {
+	return n >= openAICodexTicketMinLength && n <= openAICodexTicketMaxLength
 }
 
 // openAICodexTicketProbeThrottle 记录某 (账号,模型) 的连败退避状态。
@@ -204,7 +198,7 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 		if account != nil && account.Extra != nil {
 			ticket = parseOpenAICodexTicketFromAny(account.ID, model, account.Extra[openAICodexTicketExtraKey(model)])
 		}
-		if ticket.valid(now, openAICodexTicketTargetLength(cfg, model)) {
+		if ticket.valid(now) {
 			status.Ready = true
 			status.Length = ticket.Length
 			remaining := int64(ticket.ExpiresAt.Sub(now) / time.Second)
@@ -249,12 +243,12 @@ func (s *OpenAIGatewayService) openAICodexTicketHarvestProxyURLContext(ctx conte
 	return strings.TrimSpace(s.openAICodexTicketConfig().HarvestProxyURL)
 }
 
-func (t *openAICodexTicket) valid(now time.Time, targetLen int) bool {
+func (t *openAICodexTicket) valid(now time.Time) bool {
 	if t == nil {
 		return false
 	}
 	state := strings.TrimSpace(t.State)
-	if len(state) != targetLen || t.Length != targetLen || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+	if t.Length != len(state) || !openAICodexTicketLengthOK(len(state)) || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
 		return false
 	}
 	if t.ExpiresAt.IsZero() || !now.Before(t.ExpiresAt) {
@@ -279,7 +273,6 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 		return nil
 	}
 	key := openAICodexTicketKey(account.ID, model)
-	targetLen := openAICodexTicketTargetLength(s.openAICodexTicketConfig(), model)
 	now := time.Now()
 	var mem *openAICodexTicket
 	if raw, ok := s.openaiCodexTickets.Load(key); ok {
@@ -289,11 +282,11 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 	if account.Extra != nil {
 		extra = parseOpenAICodexTicketFromAny(account.ID, model, account.Extra[openAICodexTicketExtraKey(model)])
 	}
-	if extra.valid(now, targetLen) && (mem == nil || extra.CapturedAt.After(mem.CapturedAt)) {
+	if extra.valid(now) && (mem == nil || extra.CapturedAt.After(mem.CapturedAt)) {
 		s.openaiCodexTickets.Store(key, extra)
 		return extra
 	}
-	if mem.valid(now, targetLen) {
+	if mem.valid(now) {
 		return mem
 	}
 	// 两源都缺失或已失效：清掉缓存残留后直接返回 extra（调用方一律用
@@ -367,7 +360,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 	}
 	cfg := s.openAICodexTicketConfig()
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	if ticket.valid(time.Now(), openAICodexTicketTargetLength(cfg, model)) {
+	if ticket.valid(time.Now()) {
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
@@ -422,7 +415,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return false
 	}
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	return !ticket.valid(time.Now(), openAICodexTicketTargetLength(cfg, model))
+	return !ticket.valid(time.Now())
 }
 
 func (s *OpenAIGatewayService) fireOpenAICodexTicketProbe(ctx context.Context, account *Account, token, model, proxyURL string, attemptTimeout time.Duration) (state string, status int, err error) {
@@ -575,7 +568,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 				continue
 			}
 			// 已有一张有效且未临近过期的票 → 本周期不打，省得白刷。
-			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, openAICodexTicketTargetLength(cfg, model)) && !t.needsRefresh(now, refreshBefore) {
+			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now) && !t.needsRefresh(now, refreshBefore) {
 				continue
 			}
 			key := openAICodexTicketKey(account.ID, model)
@@ -606,8 +599,8 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	}
 }
 
-// probeOnceOpenAICodexTicket 走打票代理打一发。命中合格门票（HTTP 200、长度==该模型
-// 期望值、gAAAAA 前缀）就落库并返回 true；否则记 Info miss 返回 false，交给下个周期
+// probeOnceOpenAICodexTicket 走打票代理打一发。命中合格门票（HTTP 200、长度在合理
+// 区间、gAAAAA 前缀）就落库并返回 true；否则记 Info miss 返回 false，交给下个周期
 // （受连败退避节制）重试。同一 key 并发去重，避免上一发还没回来又叠一发。
 func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) bool {
 	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
@@ -635,7 +628,7 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 				zap.String("reason", "error"), zap.Error(perr))
 			return nil, nil
 		}
-		if status != http.StatusOK || state == "" || len(state) != openAICodexTicketTargetLength(cfg, model) || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+		if status != http.StatusOK || state == "" || !openAICodexTicketLengthOK(len(state)) || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
 				zap.Int("http", status), zap.Int("len", len(state)))

@@ -125,7 +125,7 @@ func TestLookupOpenAICodexTicket_PrefersNewerExtra(t *testing.T) {
 	got := svc.lookupOpenAICodexTicket(account, "gpt-6-astra")
 	require.NotNil(t, got)
 	require.Equal(t, newState, got.State)
-	require.True(t, got.valid(time.Now()))
+	require.True(t, got.valid(time.Now(), 292))
 }
 
 func TestApplyOpenAICodexTicket_ExpiredNotInjected(t *testing.T) {
@@ -162,8 +162,8 @@ func TestApplyOpenAICodexTicket_WrongLengthNotInjected(t *testing.T) {
 	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
 		AccountID:  41,
 		Model:      "gpt-6-astra",
-		State:      fakeCodexTicketState(600),
-		Length:     600,
+		State:      fakeCodexTicketState(312),
+		Length:     312,
 		CapturedAt: time.Now(),
 		ExpiresAt:  time.Now().Add(time.Hour),
 	})
@@ -195,18 +195,18 @@ func TestApplyOpenAICodexTicket_DisabledNoop(t *testing.T) {
 	require.Equal(t, "client-state", h.Get(openAICodexTurnStateHeader))
 }
 
-func TestHarvestOpenAICodexTicket_RejectsBadLengthAndUsesHarvestProxy(t *testing.T) {
-	state100 := fakeCodexTicketState(100)
+func TestHarvestOpenAICodexTicket_StopsAt292AndUsesHarvestProxy(t *testing.T) {
+	state312 := fakeCodexTicketState(312)
 	state292 := fakeCodexTicketState(292)
-	header100 := http.Header{}
-	header100.Set(openAICodexTurnStateHeader, state100)
+	header312 := http.Header{}
+	header312.Set(openAICodexTurnStateHeader, state312)
 	header292 := http.Header{}
 	header292.Set(openAICodexTurnStateHeader, state292)
 	upstream := &httpUpstreamRecorder{
 		responses: []*http.Response{
 			{
 				StatusCode: http.StatusOK,
-				Header:     header100,
+				Header:     header312,
 				Body:       io.NopCloser(strings.NewReader("data: {}\n\n")),
 			},
 			{
@@ -295,7 +295,7 @@ func TestLookupOpenAICodexTicket_HydratesFromExtra(t *testing.T) {
 	got := svc.lookupOpenAICodexTicket(account, "gpt-6-astra")
 	require.NotNil(t, got)
 	require.Equal(t, state, got.State)
-	require.True(t, got.valid(time.Now()))
+	require.True(t, got.valid(time.Now(), 292))
 }
 
 func TestOpenAICodexTicket_FreePlanAccountFullyExempt(t *testing.T) {
@@ -403,7 +403,7 @@ func (u *codexTicketConcurrentUpstream) Do(req *http.Request, _ string, _ int64,
 		return nil, req.Context().Err()
 	}
 	h := http.Header{}
-	h.Set(openAICodexTurnStateHeader, fakeCodexTicketState(312))
+	h.Set(openAICodexTurnStateHeader, fakeCodexTicketState(292))
 	return &http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader("data: {}\n\n"))}, nil
 }
 func TestRefreshOpenAICodexTickets_ConcurrentModelsPreserveAccountSnapshot(t *testing.T) {
@@ -421,8 +421,7 @@ func TestRefreshOpenAICodexTickets_ConcurrentModelsPreserveAccountSnapshot(t *te
 	for _, model := range []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel} {
 		ticket := svc.lookupOpenAICodexTicket(account, model)
 		require.NotNil(t, ticket)
-		require.True(t, ticket.valid(time.Now()))
-		require.Equal(t, 312, ticket.Length)
+		require.True(t, ticket.valid(time.Now(), 292))
 	}
 	// Valid tickets do not produce another probe on the next cycle.
 	svc.refreshOpenAICodexTickets(context.Background())
@@ -437,48 +436,6 @@ type codexTicketAlwaysMissUpstream struct {
 func (u *codexTicketAlwaysMissUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
 	u.started.Add(1)
 	return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"error":"overloaded"}`))}, nil
-}
-
-func TestOpenAICodexTicket_LengthRangeAccepts292And312(t *testing.T) {
-	state312 := fakeCodexTicketState(312)
-	header312 := http.Header{}
-	header312.Set(openAICodexTurnStateHeader, state312)
-	response := func() *http.Response {
-		return &http.Response{StatusCode: http.StatusOK, Header: header312.Clone(), Body: io.NopCloser(strings.NewReader("data: {}\n\n"))}
-	}
-	cfg := config.OpenAICodexTicketConfig{
-		Enabled:                      true,
-		TargetLength:                 292,
-		TTLSeconds:                   3600,
-		HarvestProxyURL:              "socks5h://user:pass@harvest.example:31",
-		HarvestAttemptTimeoutSeconds: 5,
-		FailClosed:                   true,
-		Models:                       []string{"gpt-5.6-sol"},
-	}
-	svc := ticketTestService(t, cfg, &httpUpstreamRecorder{responses: []*http.Response{response()}})
-	account := ticketTestAccount(41)
-
-	// sol 312：一发命中并可用（2026-09-19 线上实测长度）。
-	require.True(t, svc.probeOnceOpenAICodexTicket(context.Background(), account, "gpt-5.6-sol"))
-	ticket := svc.lookupOpenAICodexTicket(account, "gpt-5.6-sol")
-	require.NotNil(t, ticket)
-	require.Equal(t, state312, ticket.State)
-	require.False(t, svc.openAICodexTicketBlocksAccount(account, "gpt-5.6-sol"))
-	h := http.Header{}
-	require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-5.6-sol", h))
-	require.Equal(t, state312, h.Get(openAICodexTurnStateHeader))
-
-	// 账号列表状态（模拟 DB 回读 Extra）：sol ready、长度 312。
-	account.Extra = map[string]any{openAICodexTicketExtraKey("gpt-5.6-sol"): ticket}
-	statuses := OpenAICodexTicketStatuses(account, cfg, time.Now())
-	require.Len(t, statuses, 1)
-	require.True(t, statuses[0].Ready)
-	require.Equal(t, 312, statuses[0].Length)
-	require.False(t, statuses[0].Blocked)
-
-	// astra 同样接受 312（上游 2026-09-19 起对 astra 也发 312 长度门票）。
-	svc2 := ticketTestService(t, cfg, &httpUpstreamRecorder{responses: []*http.Response{response()}})
-	require.True(t, svc2.probeOnceOpenAICodexTicket(context.Background(), ticketTestAccount(42), "gpt-6-astra"))
 }
 
 func TestRefreshOpenAICodexTickets_MissBackoffThrottlesNextCycle(t *testing.T) {
@@ -523,7 +480,7 @@ func TestOpenAICodexTicketStatuses_RespectRuntimeConfiguration(t *testing.T) {
 	require.True(t, OpenAICodexTicketStatuses(account, cfg, time.Now())[0].Blocked)
 }
 func TestProbeOpenAICodexTicket_RejectsInvalidState(t *testing.T) {
-	for _, state := range []string{fakeCodexTicketState(100), fakeCodexTicketState(600), strings.Repeat("X", 292), ""} {
+	for _, state := range []string{fakeCodexTicketState(312), strings.Repeat("X", 292), ""} {
 		h := http.Header{}
 		h.Set(openAICodexTurnStateHeader, state)
 		upstream := &httpUpstreamRecorder{responses: []*http.Response{{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(""))}}}
@@ -535,10 +492,10 @@ func TestProbeOpenAICodexTicket_RejectsInvalidState(t *testing.T) {
 }
 func TestOpenAICodexTicket_RequiresActualLengthAndExpiry(t *testing.T) {
 	ticket := &openAICodexTicket{State: fakeCodexTicketState(312), Length: 292, ExpiresAt: time.Now().Add(time.Hour)}
-	require.False(t, ticket.valid(time.Now()))
+	require.False(t, ticket.valid(time.Now(), 292))
 	ticket.State = fakeCodexTicketState(292)
 	ticket.ExpiresAt = time.Time{}
-	require.False(t, ticket.valid(time.Now()))
+	require.False(t, ticket.valid(time.Now(), 292))
 }
 
 // /responses/compact 的出站模型被 Forward 改写为 gateway.openai_compact_model

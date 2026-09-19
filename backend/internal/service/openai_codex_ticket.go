@@ -30,8 +30,8 @@ const (
 	openAICodexTicketDefaultSolModel = "gpt-5.6-sol"
 )
 
-// ErrOpenAICodexTicketUnavailable 表示该号该模型没有可用门票（长度按区间校验，
-// 见 openAICodexTicketLengthOK），且 fail_closed 禁止裸打业务请求。
+// ErrOpenAICodexTicketUnavailable 表示该号该模型没有可用的 292 门票，
+// 且 fail_closed 禁止裸打业务请求。
 var ErrOpenAICodexTicketUnavailable = errors.New("codex turn-state ticket unavailable")
 
 type openAICodexTicket struct {
@@ -62,19 +62,6 @@ const (
 	openAICodexTicketProbeBackoffMax      = 15 * time.Minute
 	openAICodexTicketProbeBackoffShiftCap = 6
 )
-
-// 门票长度合理区间。长度本质是 Fernet 密文 base64 的长度，随上游 payload
-// 变化（同日内已观测 292 与 312 两种，均为有效票），因此用区间校验代替
-// 精确匹配，避免上游调整长度后全网持续 miss。
-const (
-	openAICodexTicketMinLength = 200
-	openAICodexTicketMaxLength = 512
-)
-
-// openAICodexTicketLengthOK 校验门票长度是否落在合理区间。
-func openAICodexTicketLengthOK(n int) bool {
-	return n >= openAICodexTicketMinLength && n <= openAICodexTicketMaxLength
-}
 
 // openAICodexTicketProbeThrottle 记录某 (账号,模型) 的连败退避状态。
 type openAICodexTicketProbeThrottle struct {
@@ -183,9 +170,12 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 	if !cfg.Enabled || !isOpenAICodexTicketAccount(account) {
 		return nil
 	}
-	models := cfg.Models
+	models, targetLen := cfg.Models, cfg.TargetLength
 	if len(models) == 0 {
 		models = []string{openAICodexTicketDefaultModel, openAICodexTicketDefaultSolModel}
+	}
+	if targetLen <= 0 {
+		targetLen = 292
 	}
 	out := make([]OpenAICodexTicketStatus, 0, len(models))
 	for _, model := range models {
@@ -198,7 +188,7 @@ func OpenAICodexTicketStatuses(account *Account, cfg config.OpenAICodexTicketCon
 		if account != nil && account.Extra != nil {
 			ticket = parseOpenAICodexTicketFromAny(account.ID, model, account.Extra[openAICodexTicketExtraKey(model)])
 		}
-		if ticket.valid(now) {
+		if ticket.valid(now, targetLen) {
 			status.Ready = true
 			status.Length = ticket.Length
 			remaining := int64(ticket.ExpiresAt.Sub(now) / time.Second)
@@ -243,12 +233,12 @@ func (s *OpenAIGatewayService) openAICodexTicketHarvestProxyURLContext(ctx conte
 	return strings.TrimSpace(s.openAICodexTicketConfig().HarvestProxyURL)
 }
 
-func (t *openAICodexTicket) valid(now time.Time) bool {
+func (t *openAICodexTicket) valid(now time.Time, targetLen int) bool {
 	if t == nil {
 		return false
 	}
 	state := strings.TrimSpace(t.State)
-	if t.Length != len(state) || !openAICodexTicketLengthOK(len(state)) || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+	if len(state) != targetLen || t.Length != targetLen || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
 		return false
 	}
 	if t.ExpiresAt.IsZero() || !now.Before(t.ExpiresAt) {
@@ -273,6 +263,10 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 		return nil
 	}
 	key := openAICodexTicketKey(account.ID, model)
+	targetLen := 292
+	if s != nil {
+		targetLen = s.openAICodexTicketConfig().TargetLength
+	}
 	now := time.Now()
 	var mem *openAICodexTicket
 	if raw, ok := s.openaiCodexTickets.Load(key); ok {
@@ -282,11 +276,11 @@ func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model s
 	if account.Extra != nil {
 		extra = parseOpenAICodexTicketFromAny(account.ID, model, account.Extra[openAICodexTicketExtraKey(model)])
 	}
-	if extra.valid(now) && (mem == nil || extra.CapturedAt.After(mem.CapturedAt)) {
+	if extra.valid(now, targetLen) && (mem == nil || extra.CapturedAt.After(mem.CapturedAt)) {
 		s.openaiCodexTickets.Store(key, extra)
 		return extra
 	}
-	if mem.valid(now) {
+	if mem.valid(now, targetLen) {
 		return mem
 	}
 	// 两源都缺失或已失效：清掉缓存残留后直接返回 extra（调用方一律用
@@ -360,7 +354,7 @@ func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, accou
 	}
 	cfg := s.openAICodexTicketConfig()
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	if ticket.valid(time.Now()) {
+	if ticket.valid(time.Now(), cfg.TargetLength) {
 		h.Set(openAICodexTurnStateHeader, ticket.State)
 		return nil
 	}
@@ -415,7 +409,7 @@ func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, 
 		return false
 	}
 	ticket := s.lookupOpenAICodexTicket(account, model)
-	return !ticket.valid(time.Now())
+	return !ticket.valid(time.Now(), cfg.TargetLength)
 }
 
 func (s *OpenAIGatewayService) fireOpenAICodexTicketProbe(ctx context.Context, account *Account, token, model, proxyURL string, attemptTimeout time.Duration) (state string, status int, err error) {
@@ -568,7 +562,7 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 				continue
 			}
 			// 已有一张有效且未临近过期的票 → 本周期不打，省得白刷。
-			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now) && !t.needsRefresh(now, refreshBefore) {
+			if t := s.lookupOpenAICodexTicket(&account, model); t.valid(now, cfg.TargetLength) && !t.needsRefresh(now, refreshBefore) {
 				continue
 			}
 			key := openAICodexTicketKey(account.ID, model)
@@ -599,8 +593,8 @@ func (s *OpenAIGatewayService) refreshOpenAICodexTickets(ctx context.Context) {
 	}
 }
 
-// probeOnceOpenAICodexTicket 走打票代理打一发。命中合格门票（HTTP 200、长度在合理
-// 区间、gAAAAA 前缀）就落库并返回 true；否则记 Info miss 返回 false，交给下个周期
+// probeOnceOpenAICodexTicket 走打票代理打一发。命中合格 292（HTTP 200、长度==target、
+// gAAAAA 前缀）就落库并返回 true；否则记 Info miss 返回 false，交给下个周期
 // （受连败退避节制）重试。同一 key 并发去重，避免上一发还没回来又叠一发。
 func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, account *Account, model string) bool {
 	if s == nil || !isOpenAICodexTicketAccount(account) || ctx.Err() != nil || !s.openAICodexTicketEnabledContext(ctx) {
@@ -628,7 +622,7 @@ func (s *OpenAIGatewayService) probeOnceOpenAICodexTicket(ctx context.Context, a
 				zap.String("reason", "error"), zap.Error(perr))
 			return nil, nil
 		}
-		if status != http.StatusOK || state == "" || !openAICodexTicketLengthOK(len(state)) || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
+		if status != http.StatusOK || state == "" || len(state) != cfg.TargetLength || !strings.HasPrefix(state, openAICodexTicketStatePrefix) {
 			logger.L().Info("openai_codex_ticket probe miss",
 				zap.Int64("account_id", account.ID), zap.String("model", model),
 				zap.Int("http", status), zap.Int("len", len(state)))

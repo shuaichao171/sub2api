@@ -218,6 +218,10 @@ type SystemSettings struct {
 	OpenAICodexClientVersionSynced          string `json:"openai_codex_client_version_synced"`
 	OpenAICodexVersionAutoSyncEnabled       bool   `json:"openai_codex_version_auto_sync_enabled"`
 	OpenAICodexTicketEnabled                bool   `json:"openai_codex_ticket_enabled"`
+	OpenAICodexTicketAllowWithoutTicket     bool   `json:"openai_codex_ticket_allow_without_ticket"`
+	OpenAICodexTicketTTLSeconds             int    `json:"openai_codex_ticket_ttl_seconds"`
+	OpenAICodexTicketReuseExpired           bool   `json:"openai_codex_ticket_reuse_expired"`
+	OpenAICodexTicketReuseExpiredMaxSeconds int    `json:"openai_codex_ticket_reuse_expired_max_seconds"`
 	OpenAICodexTicketHarvestProxyURL        string `json:"openai_codex_ticket_harvest_proxy_url"`
 	OpenAICodexTicketHarvestProxyConfigured bool   `json:"openai_codex_ticket_harvest_proxy_configured"`
 

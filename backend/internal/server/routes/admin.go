@@ -388,6 +388,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/:id/apply-oauth-credentials", h.Admin.Account.ApplyOAuthCredentials)
 		accounts.POST("/:id/set-privacy", h.Admin.Account.SetPrivacy)
 		accounts.POST("/:id/refresh-tier", h.Admin.Account.RefreshTier)
+		accounts.GET("/:id/codex-ticket-history", h.Admin.Account.GetCodexTicketHistory)
+		accounts.POST("/:id/codex-ticket-harvest", h.Admin.Account.HarvestCodexTicket)
+		accounts.PUT("/:id/codex-ticket-participation", h.Admin.Account.SetCodexTicketParticipation)
 		accounts.GET("/:id/stats", h.Admin.Account.GetStats)
 		accounts.POST("/:id/clear-error", h.Admin.Account.ClearError)
 		accounts.POST("/:id/revert-proxy-fallback", h.Admin.Account.RevertProxyFallback)
@@ -512,6 +515,8 @@ func registerProxyRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth
 	{
 		proxies.GET("", h.Admin.Proxy.List)
 		proxies.GET("/all", h.Admin.Proxy.GetAll)
+		proxies.GET("/codex-ticket-pool", h.Admin.Proxy.GetCodexTicketPool)
+		proxies.PUT("/codex-ticket-pool", h.Admin.Proxy.UpdateCodexTicketPool)
 		// 代理导出泄露账号密码原文——要求 step-up 2FA
 		proxies.GET("/data", gin.HandlerFunc(stepUpAuth), h.Admin.Proxy.ExportData)
 		proxies.POST("/data", h.Admin.Proxy.ImportData)

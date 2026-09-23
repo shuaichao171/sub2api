@@ -66,6 +66,7 @@ type AccountHandler struct {
 	upstreamBillingProbe    *service.UpstreamBillingProbeService
 	ollamaCloudUsage        *service.OllamaCloudUsageService
 	codexTicketSettings     *service.SettingService
+	codexTicketGateway      *service.OpenAIGatewayService
 	cfg                     *config.Config
 }
 
@@ -81,6 +82,10 @@ func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUs
 // SetCodexTicketSettings supplies the live policy without mutating shared config.
 func (h *AccountHandler) SetCodexTicketSettings(settings *service.SettingService) {
 	h.codexTicketSettings = settings
+}
+
+func (h *AccountHandler) SetCodexTicketGateway(gateway *service.OpenAIGatewayService) {
+	h.codexTicketGateway = gateway
 }
 
 // NewAccountHandler creates a new admin account handler
@@ -367,6 +372,9 @@ func (h *AccountHandler) enrichCodexTicketStatus(account *service.Account, out *
 		cfg := h.cfg.Gateway.OpenAICodexTicket
 		if h.codexTicketSettings != nil {
 			cfg.Enabled = h.codexTicketSettings.GetOpenAICodexTicketEnabled(context.Background(), cfg.Enabled)
+			cfg.FailClosed = !h.codexTicketSettings.GetOpenAICodexTicketAllowWithoutTicket(context.Background(), !cfg.FailClosed)
+			cfg.ReuseExpired = h.codexTicketSettings.GetOpenAICodexTicketReuseExpired(context.Background(), cfg.ReuseExpired)
+			cfg.ReuseExpiredMaxSeconds = h.codexTicketSettings.GetOpenAICodexTicketReuseExpiredMaxSeconds(context.Background(), cfg.ReuseExpiredMaxSeconds)
 		}
 		out.CodexTurnTickets = service.OpenAICodexTicketStatuses(account, cfg, time.Now())
 	}

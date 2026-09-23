@@ -15,6 +15,18 @@ import type {
   AdminDataImportResult
 } from '@/types'
 
+export interface CodexTicketPool { mode: 'all' | 'custom'; proxy_ids: number[] }
+
+export async function getCodexTicketPool(): Promise<CodexTicketPool> {
+  const { data } = await apiClient.get<CodexTicketPool>('/admin/proxies/codex-ticket-pool')
+  return data
+}
+
+export async function updateCodexTicketPool(pool: CodexTicketPool): Promise<CodexTicketPool> {
+  const { data } = await apiClient.put<CodexTicketPool>('/admin/proxies/codex-ticket-pool', pool)
+  return data
+}
+
 function assertProxyArray(value: unknown): asserts value is Proxy[] {
   if (!Array.isArray(value)) {
     throw new Error('Invalid proxy list response')

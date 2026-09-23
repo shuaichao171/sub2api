@@ -59,7 +59,7 @@ func TestCodexTicketProbeBypassesPluginDuringWiring(t *testing.T) {
 	}()
 	close(start)
 	for i := 0; i < 20; i++ {
-		state, status, err := svc.fireOpenAICodexTicketProbe(context.Background(), account, "test-token", "gpt-6-astra", "http://proxy.example.com:8080", time.Second)
+		state, _, status, err := svc.fireOpenAICodexTicketProbe(context.Background(), account, "test-token", "gpt-6-astra", "http://proxy.example.com:8080", time.Second)
 		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, status)
 		require.Len(t, state, 292)
@@ -98,7 +98,7 @@ func (r *codexTicketLifecycleSettings) GetValue(ctx context.Context, key string)
 }
 
 func TestCodexTicketHarvesterStopCancelsInFlightWork(t *testing.T) {
-	for _, stage := range []string{"settings-enabled", "settings-proxy", "accounts", "upstream", "persist"} {
+	for _, stage := range []string{"settings-enabled", "accounts", "upstream", "persist"} {
 		t.Run(stage, func(t *testing.T) {
 			started := make(chan struct{})
 			cancelled := make(chan struct{})
@@ -128,7 +128,7 @@ func TestCodexTicketHarvesterStopCancelsInFlightWork(t *testing.T) {
 			}
 			if strings.HasPrefix(stage, "settings-") {
 				svc.settingService = NewSettingService(&codexTicketLifecycleSettings{get: func(ctx context.Context, key string) (string, error) {
-					if stage == "settings-enabled" && key == SettingKeyOpenAICodexTicketEnabled || stage == "settings-proxy" && key == SettingKeyOpenAICodexTicketHarvestProxyURL {
+					if stage == "settings-enabled" && key == SettingKeyOpenAICodexTicketEnabled {
 						return "", block(ctx)
 					}
 					if key == SettingKeyOpenAICodexTicketEnabled {
@@ -169,16 +169,22 @@ type codexTicketHeaderOnlyBody struct{ reads, closes int }
 func (b *codexTicketHeaderOnlyBody) Read([]byte) (int, error) { b.reads++; return 0, io.EOF }
 func (b *codexTicketHeaderOnlyBody) Close() error             { b.closes++; return nil }
 func TestCodexTicketProbeClosesStreamWithoutDraining(t *testing.T) {
-	body := &codexTicketHeaderOnlyBody{}
-	svc := ticketTestService(t, config.OpenAICodexTicketConfig{}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) {
-		response := codexTicketResponse()
-		response.Body = body
-		return response, nil
-	}})
-	_, _, err := svc.fireOpenAICodexTicketProbe(context.Background(), ticketTestAccount(41), "test-token", "gpt-6-astra", "", time.Second)
-	require.NoError(t, err)
-	require.Zero(t, body.reads)
-	require.Equal(t, 1, body.closes)
+	for _, status := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			body := &codexTicketHeaderOnlyBody{}
+			svc := ticketTestService(t, config.OpenAICodexTicketConfig{}, &codexTicketFuncUpstream{do: func(*http.Request) (*http.Response, error) {
+				response := codexTicketResponse()
+				response.StatusCode = status
+				response.Header.Set("Content-Type", "text/event-stream")
+				response.Body = body
+				return response, nil
+			}})
+			_, _, _, err := svc.fireOpenAICodexTicketProbe(context.Background(), ticketTestAccount(41), "test-token", "gpt-6-astra", "", time.Second)
+			require.NoError(t, err)
+			require.Zero(t, body.reads)
+			require.Equal(t, 1, body.closes)
+		})
+	}
 }
 
 func TestCodexTicketPolicyExemptsCredentialShadows(t *testing.T) {

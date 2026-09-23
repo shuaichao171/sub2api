@@ -5,6 +5,55 @@
 
 import { apiClient } from '../client'
 import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'
+
+export type CodexTicketStatus = NonNullable<Account['codex_turn_tickets']>[number]
+
+export interface CodexTicketAttempt {
+  id: number
+  account_id: number
+  model: string
+  occurred_at: string
+  outcome: 'success' | 'miss' | 'error'
+  trigger: 'automatic' | 'manual'
+  http_status: number | null
+  ticket_length: number | null
+  duration_ms: number
+  reason_code?: string
+  proxy_id?: number
+  proxy_name?: string
+  expires_at?: string
+}
+
+export interface CodexTicketHistory {
+  items: CodexTicketAttempt[]
+  total: number
+  page: number
+  page_size: number
+  ticket_status: CodexTicketStatus
+  manual_available: boolean
+  manual_unavailable_reason: string
+}
+
+export interface CodexTicketHarvestResult extends CodexTicketAttempt {
+  ticket_status: CodexTicketStatus
+  history_recorded: boolean
+}
+
+export async function getCodexTicketHistory(id: number, model: string, filter: 'all' | 'success', page: number): Promise<CodexTicketHistory> {
+  const { data } = await apiClient.get<CodexTicketHistory>(`/admin/accounts/${id}/codex-ticket-history`, {
+    params: { model, filter, page, page_size: 20 }
+  })
+  return data
+}
+
+export async function harvestCodexTicket(id: number, model: string): Promise<CodexTicketHarvestResult> {
+  const { data } = await apiClient.post<CodexTicketHarvestResult>(`/admin/accounts/${id}/codex-ticket-harvest`, { model })
+  return data
+}
+
+export async function setCodexTicketParticipation(id: number, enabled: boolean, models: Record<string, boolean>): Promise<void> {
+  await apiClient.put(`/admin/accounts/${id}/codex-ticket-participation`, { enabled, models })
+}
 import type {
   Account,
   AccountListItem,

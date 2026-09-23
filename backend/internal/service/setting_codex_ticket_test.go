@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -14,6 +13,30 @@ import (
 type codexTicketSettingRepo struct {
 	*codexPolicyMigrationRepoStub
 	err error
+}
+
+type codexTicketProxyRepoStub struct {
+	ProxyRepository
+	active []Proxy
+	all    []Proxy
+}
+
+func (r *codexTicketProxyRepoStub) ListActive(context.Context) ([]Proxy, error) {
+	return append([]Proxy(nil), r.active...), nil
+}
+
+func (r *codexTicketProxyRepoStub) ListByIDs(_ context.Context, ids []int64) ([]Proxy, error) {
+	selected := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		selected[id] = true
+	}
+	result := make([]Proxy, 0, len(ids))
+	for _, proxy := range r.all {
+		if selected[proxy.ID] {
+			result = append(result, proxy)
+		}
+	}
+	return result, nil
 }
 
 func (r *codexTicketSettingRepo) GetValue(ctx context.Context, key string) (string, error) {
@@ -61,6 +84,78 @@ func TestCodexTicketEnabledRuntimeSettingOverridesYaml(t *testing.T) {
 	require.Equal(t, "client-state", h.Get(openAICodexTurnStateHeader))
 }
 
+func TestCodexTicketTTLAndReuseRuntimeSettingsOverrideYaml(t *testing.T) {
+	repo := &codexTicketSettingRepo{codexPolicyMigrationRepoStub: &codexPolicyMigrationRepoStub{values: map[string]string{
+		SettingKeyOpenAICodexTicketTTLSeconds:   "120",
+		SettingKeyOpenAICodexTicketReuseExpired: "true",
+	}}}
+	settings := NewSettingService(repo, &config.Config{})
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+		Enabled: true, TargetLength: 292, TTLSeconds: 3600, ReuseExpired: false, FailClosed: true,
+	}, nil)
+	svc.settingService = settings
+
+	cfg := svc.openAICodexTicketConfig()
+	require.Equal(t, 120, cfg.TTLSeconds)
+	require.True(t, cfg.ReuseExpired)
+
+	account := ticketTestAccount(41)
+	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
+		AccountID: account.ID, Model: "gpt-6-astra", State: fakeCodexTicketState(292), Length: 292,
+		CapturedAt: time.Now().Add(-10 * time.Minute), ExpiresAt: time.Now().Add(-time.Minute),
+	})
+	h := http.Header{}
+	require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", h))
+	require.Equal(t, fakeCodexTicketState(292), h.Get(openAICodexTurnStateHeader))
+
+	// 运行时可热更新：关闭沿用后过期票据立即失效。
+	repo.values[SettingKeyOpenAICodexTicketReuseExpired] = "false"
+	settings.InvalidateOpenAICodexTicketReuseExpiredCache()
+	require.False(t, svc.openAICodexTicketConfig().ReuseExpired)
+	h = http.Header{}
+	require.ErrorIs(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", h), ErrOpenAICodexTicketUnavailable)
+}
+
+func TestNormalizeOpenAICodexTicketTTLSecondsClamps(t *testing.T) {
+	require.Equal(t, openAICodexTicketMinTTLSeconds, normalizeOpenAICodexTicketTTLSeconds(30))
+	require.Equal(t, openAICodexTicketDefaultTTLSeconds, normalizeOpenAICodexTicketTTLSeconds(0))
+	require.Equal(t, openAICodexTicketMaxTTLSeconds, normalizeOpenAICodexTicketTTLSeconds(openAICodexTicketMaxTTLSeconds+1))
+	require.Equal(t, 200, normalizeOpenAICodexTicketTTLSeconds(200))
+	require.Equal(t, 0, normalizeOpenAICodexTicketReuseWindowSeconds(0))
+	require.Equal(t, openAICodexTicketDefaultReuseWindowSeconds, normalizeOpenAICodexTicketReuseWindowSeconds(-1))
+	require.Equal(t, openAICodexTicketMaxTTLSeconds, normalizeOpenAICodexTicketReuseWindowSeconds(openAICodexTicketMaxTTLSeconds+1))
+	require.Equal(t, 600, normalizeOpenAICodexTicketReuseWindowSeconds(600))
+}
+
+func TestCodexTicketReuseWindowRuntimeSettingOverridesYaml(t *testing.T) {
+	repo := &codexTicketSettingRepo{codexPolicyMigrationRepoStub: &codexPolicyMigrationRepoStub{values: map[string]string{
+		SettingKeyOpenAICodexTicketReuseExpired:           "true",
+		SettingKeyOpenAICodexTicketReuseExpiredMaxSeconds: "60",
+	}}}
+	settings := NewSettingService(repo, &config.Config{})
+	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
+		Enabled: true, TargetLength: 292, TTLSeconds: 60, ReuseExpired: true,
+		ReuseExpiredMaxSeconds: 3600, FailClosed: true,
+	}, nil)
+	svc.settingService = settings
+	require.Equal(t, 60, svc.openAICodexTicketConfig().ReuseExpiredMaxSeconds)
+
+	account := ticketTestAccount(41)
+	svc.storeOpenAICodexTicket(context.Background(), account, &openAICodexTicket{
+		AccountID: account.ID, Model: "gpt-6-astra", State: fakeCodexTicketState(292), Length: 292,
+		CapturedAt: time.Now().Add(-10 * time.Minute), ExpiresAt: time.Now().Add(-5 * time.Minute),
+	})
+	h := http.Header{}
+	require.ErrorIs(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", h), ErrOpenAICodexTicketUnavailable)
+
+	// 0 = 不限制，热更新后立即恢复沿用。
+	repo.values[SettingKeyOpenAICodexTicketReuseExpiredMaxSeconds] = "0"
+	settings.InvalidateOpenAICodexTicketReuseExpiredMaxSecondsCache()
+	h = http.Header{}
+	require.NoError(t, svc.applyOpenAICodexTicket(context.Background(), account, "gpt-6-astra", h))
+	require.Equal(t, fakeCodexTicketState(292), h.Get(openAICodexTurnStateHeader))
+}
+
 func TestRefreshOpenAICodexTickets_DisabledSkipsHarvest(t *testing.T) {
 	upstream := &httpUpstreamRecorder{}
 	svc := ticketTestService(t, config.OpenAICodexTicketConfig{
@@ -70,27 +165,6 @@ func TestRefreshOpenAICodexTickets_DisabledSkipsHarvest(t *testing.T) {
 	svc.accountRepo = &codexTicketRefreshRepo{accounts: []Account{*ticketTestAccount(41)}}
 	svc.refreshOpenAICodexTickets(context.Background())
 	require.Empty(t, upstream.requests)
-}
-
-func TestCodexTicketProxyRuntimeSettingAndFallback(t *testing.T) {
-	repo := &codexTicketSettingRepo{codexPolicyMigrationRepoStub: &codexPolicyMigrationRepoStub{values: map[string]string{}}}
-	settings := NewSettingService(repo, &config.Config{})
-	svc := ticketTestService(t, config.OpenAICodexTicketConfig{HarvestProxyURL: "http://fallback.example.com:8080"}, nil)
-	svc.settingService = settings
-	require.Equal(t, "http://fallback.example.com:8080", svc.openAICodexTicketHarvestProxyURL())
-	repo.values[SettingKeyOpenAICodexTicketHarvestProxyURL] = "socks5h://user:secret@first.example.com:1080"
-	settings.InvalidateOpenAICodexTicketHarvestProxyCache()
-	require.Equal(t, repo.values[SettingKeyOpenAICodexTicketHarvestProxyURL], svc.openAICodexTicketHarvestProxyURL())
-	repo.values[SettingKeyOpenAICodexTicketHarvestProxyURL] = "http://second.example.com:8080"
-	settings.InvalidateOpenAICodexTicketHarvestProxyCache()
-	require.Equal(t, "http://second.example.com:8080", svc.openAICodexTicketHarvestProxyURL())
-	// Simulate another instance's settings write after the local cache expires.
-	repo.values[SettingKeyOpenAICodexTicketHarvestProxyURL] = "https://third.example.com:443"
-	settings.openAICodexTicketHarvestProxyCache.Store(&cachedOpenAICodexTicketHarvestProxy{value: "http://second.example.com:8080", expiresAt: time.Now().Add(-time.Second).UnixNano()})
-	require.Equal(t, "https://third.example.com:443", svc.openAICodexTicketHarvestProxyURL())
-	repo.err = errors.New("database unavailable")
-	settings.openAICodexTicketHarvestProxyCache.Store(&cachedOpenAICodexTicketHarvestProxy{value: "https://third.example.com:443", expiresAt: 0})
-	require.Equal(t, "https://third.example.com:443", svc.openAICodexTicketHarvestProxyURL())
 }
 
 func TestCodexTicketProxyMaskAndValidation(t *testing.T) {
@@ -116,4 +190,48 @@ func TestCodexTicketSettingsRefreshDoesNotMutateSharedConfig(t *testing.T) {
 	svc.refreshCachedSettings(&SystemSettings{OpenAICodexTicketEnabled: true})
 	require.False(t, cfg.Gateway.OpenAICodexTicket.Enabled, "runtime settings must not write the shared immutable startup configuration")
 	require.True(t, svc.GetOpenAICodexTicketEnabled(context.Background(), false))
+}
+
+func TestCodexTicketProxyPoolAllAndCustomModes(t *testing.T) {
+	now := time.Now()
+	expiredAt := now.Add(-time.Minute)
+	settingRepo := &codexTicketSettingRepo{codexPolicyMigrationRepoStub: &codexPolicyMigrationRepoStub{values: map[string]string{}}}
+	proxyRepo := &codexTicketProxyRepoStub{
+		active: []Proxy{{ID: 1, Name: "first", Status: StatusActive}, {ID: 2, Name: "second", Status: StatusActive}, {ID: 3, Name: "expired", Status: StatusActive, ExpiresAt: &expiredAt}},
+		all:    []Proxy{{ID: 1, Name: "first"}, {ID: 2, Name: "second"}, {ID: 3, Name: "expired"}},
+	}
+	svc := NewSettingService(settingRepo, &config.Config{})
+	svc.SetProxyRepository(proxyRepo)
+
+	pool, err := svc.GetCodexTicketPool(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, CodexTicketPool{Mode: "all", ProxyIDs: []int64{}}, pool)
+	available, err := svc.AvailableCodexTicketProxies(context.Background())
+	require.NoError(t, err)
+	require.Len(t, available, 2)
+	require.Equal(t, []int64{1, 2}, []int64{available[0].ID, available[1].ID})
+
+	require.NoError(t, svc.SetCodexTicketPool(context.Background(), CodexTicketPool{Mode: "custom", ProxyIDs: []int64{2}}))
+	available, err = svc.AvailableCodexTicketProxies(context.Background())
+	require.NoError(t, err)
+	require.Len(t, available, 1)
+	require.Equal(t, int64(2), available[0].ID)
+	proxyRepo.active = []Proxy{{ID: 1, Name: "first", Status: StatusActive}, {ID: 3, Name: "expired", Status: StatusActive, ExpiresAt: &expiredAt}}
+	available, err = svc.AvailableCodexTicketProxies(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, available, "a disabled or deleted custom proxy must stop participating on the next selection")
+	proxyRepo.active = []Proxy{{ID: 1, Name: "first", Status: StatusActive}, {ID: 2, Name: "second", Status: StatusActive}, {ID: 3, Name: "expired", Status: StatusActive, ExpiresAt: &expiredAt}}
+
+	proxyRepo.active = append(proxyRepo.active, Proxy{ID: 4, Name: "new", Status: StatusActive})
+	proxyRepo.all = append(proxyRepo.all, Proxy{ID: 4, Name: "new"})
+	available, err = svc.AvailableCodexTicketProxies(context.Background())
+	require.NoError(t, err)
+	require.Len(t, available, 1, "custom mode must not include newly added proxies")
+
+	require.NoError(t, svc.SetCodexTicketPool(context.Background(), CodexTicketPool{Mode: "all", ProxyIDs: []int64{2}}))
+	available, err = svc.AvailableCodexTicketProxies(context.Background())
+	require.NoError(t, err)
+	require.Len(t, available, 3)
+	require.Equal(t, []int64{1, 2, 4}, []int64{available[0].ID, available[1].ID, available[2].ID})
+	require.Error(t, svc.SetCodexTicketPool(context.Background(), CodexTicketPool{Mode: "custom", ProxyIDs: []int64{99}}))
 }

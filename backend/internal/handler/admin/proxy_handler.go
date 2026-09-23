@@ -15,7 +15,8 @@ import (
 
 // ProxyHandler handles admin proxy management
 type ProxyHandler struct {
-	adminService service.AdminService
+	adminService       service.AdminService
+	codexTicketSettings *service.SettingService
 }
 
 // NewProxyHandler creates a new admin proxy handler
@@ -23,6 +24,10 @@ func NewProxyHandler(adminService service.AdminService) *ProxyHandler {
 	return &ProxyHandler{
 		adminService: adminService,
 	}
+}
+
+func (h *ProxyHandler) SetCodexTicketSettings(settings *service.SettingService) {
+	h.codexTicketSettings = settings
 }
 
 // CreateProxyRequest represents create proxy request

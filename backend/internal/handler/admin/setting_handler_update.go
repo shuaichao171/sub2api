@@ -257,8 +257,12 @@ type UpdateSettingsRequest struct {
 	OpenAICodexUserAgent                   *string `json:"openai_codex_user_agent"`
 	OpenAICodexClientVersion               *string `json:"openai_codex_client_version"`
 	OpenAICodexVersionAutoSyncEnabled      *bool   `json:"openai_codex_version_auto_sync_enabled"`
-	OpenAICodexTicketEnabled               *bool   `json:"openai_codex_ticket_enabled"`
-	OpenAICodexTicketHarvestProxyURL       string  `json:"openai_codex_ticket_harvest_proxy_url"`
+	OpenAICodexTicketEnabled                *bool   `json:"openai_codex_ticket_enabled"`
+	OpenAICodexTicketAllowWithoutTicket     *bool   `json:"openai_codex_ticket_allow_without_ticket"`
+	OpenAICodexTicketTTLSeconds             *int    `json:"openai_codex_ticket_ttl_seconds"`
+	OpenAICodexTicketReuseExpired           *bool   `json:"openai_codex_ticket_reuse_expired"`
+	OpenAICodexTicketReuseExpiredMaxSeconds *int    `json:"openai_codex_ticket_reuse_expired_max_seconds"`
+	OpenAICodexTicketHarvestProxyURL        string  `json:"openai_codex_ticket_harvest_proxy_url"`
 
 	// codex_cli_only 加固（global-only）
 	MinCodexVersion                      string `json:"min_codex_version"`
@@ -1776,6 +1780,30 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.OpenAICodexTicketEnabled
 		}(),
+		OpenAICodexTicketAllowWithoutTicket: func() bool {
+			if req.OpenAICodexTicketAllowWithoutTicket != nil {
+				return *req.OpenAICodexTicketAllowWithoutTicket
+			}
+			return previousSettings.OpenAICodexTicketAllowWithoutTicket
+		}(),
+		OpenAICodexTicketTTLSeconds: func() int {
+			if req.OpenAICodexTicketTTLSeconds != nil {
+				return *req.OpenAICodexTicketTTLSeconds
+			}
+			return previousSettings.OpenAICodexTicketTTLSeconds
+		}(),
+		OpenAICodexTicketReuseExpired: func() bool {
+			if req.OpenAICodexTicketReuseExpired != nil {
+				return *req.OpenAICodexTicketReuseExpired
+			}
+			return previousSettings.OpenAICodexTicketReuseExpired
+		}(),
+		OpenAICodexTicketReuseExpiredMaxSeconds: func() int {
+			if req.OpenAICodexTicketReuseExpiredMaxSeconds != nil {
+				return *req.OpenAICodexTicketReuseExpiredMaxSeconds
+			}
+			return previousSettings.OpenAICodexTicketReuseExpiredMaxSeconds
+		}(),
 		OpenAICodexTicketHarvestProxyURL: func() string {
 			next := strings.TrimSpace(req.OpenAICodexTicketHarvestProxyURL)
 			// 显式哨兵：清除已保存的代理（空串按既有约定表示保持原值）。
@@ -2330,6 +2358,10 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		OpenAICodexClientVersionSynced:                         updatedSettings.OpenAICodexClientVersionSynced,
 		OpenAICodexVersionAutoSyncEnabled:                      updatedSettings.OpenAICodexVersionAutoSyncEnabled,
 		OpenAICodexTicketEnabled:                               updatedSettings.OpenAICodexTicketEnabled,
+		OpenAICodexTicketAllowWithoutTicket:                    updatedSettings.OpenAICodexTicketAllowWithoutTicket,
+		OpenAICodexTicketTTLSeconds:                            updatedSettings.OpenAICodexTicketTTLSeconds,
+		OpenAICodexTicketReuseExpired:                          updatedSettings.OpenAICodexTicketReuseExpired,
+		OpenAICodexTicketReuseExpiredMaxSeconds:                updatedSettings.OpenAICodexTicketReuseExpiredMaxSeconds,
 		OpenAICodexTicketHarvestProxyURL:                       service.MaskProxyURL(updatedSettings.OpenAICodexTicketHarvestProxyURL),
 		OpenAICodexTicketHarvestProxyConfigured:                strings.TrimSpace(updatedSettings.OpenAICodexTicketHarvestProxyURL) != "",
 		MinCodexVersion:                                        updatedSettings.MinCodexVersion,

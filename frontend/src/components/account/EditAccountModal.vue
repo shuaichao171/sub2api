@@ -2251,6 +2251,11 @@
         </div>
       </div>
 
+      <CodexTicketPolicyField
+        v-if="show && account?.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token') && !account.parent_account_id"
+        v-model="codexTicketPolicy"
+      />
+
       <!-- Codex 292 门票状态（仅 OpenAI OAuth） -->
       <div
         v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token') && codexTurnTickets.length"
@@ -3068,6 +3073,7 @@ import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import UpstreamRequestIdHeaderField from '@/components/account/UpstreamRequestIdHeaderField.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Icon from '@/components/icons/Icon.vue'
+import CodexTicketPolicyField from './CodexTicketPolicyField.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
@@ -3169,6 +3175,7 @@ const selectableGroups = computed(() => {
 const isSparkShadow = computed(() => props.account?.parent_account_id != null)
 
 const codexTurnTickets = computed(() => props.account?.codex_turn_tickets ?? [])
+const codexTicketPolicy = ref<'inherit' | 'allow' | 'deny'>('inherit')
 
 function formatCodexTicketRemaining(seconds: number) {
   const total = Math.max(0, Math.floor(seconds || 0))
@@ -3982,6 +3989,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedChannelWarningDetails.value = null
   mixedChannelWarningRawMessage.value = ''
   mixedChannelWarningAction.value = null
+  codexTicketPolicy.value = newAccount.extra?.codex_allow_without_ticket === true ? 'allow' : newAccount.extra?.codex_allow_without_ticket === false ? 'deny' : 'inherit'
   form.name = newAccount.name
   form.notes = newAccount.notes || ''
   form.proxy_id = newAccount.proxy_id
@@ -5713,6 +5721,14 @@ const handleSubmit = async () => {
         delete newExtra.upstream_request_id_header
       }
       updatePayload.extra = newExtra
+    }
+
+    const previousTicketPolicy = props.account.extra?.codex_allow_without_ticket === true ? 'allow' : props.account.extra?.codex_allow_without_ticket === false ? 'deny' : 'inherit'
+    if (codexTicketPolicy.value !== previousTicketPolicy && props.account.platform === 'openai' && !props.account.parent_account_id && (props.account.type === 'oauth' || props.account.type === 'setup-token')) {
+      const extra = { ...((updatePayload.extra || props.account.extra || {}) as Record<string, unknown>) }
+      if (codexTicketPolicy.value === 'inherit') delete extra.codex_allow_without_ticket
+      else extra.codex_allow_without_ticket = codexTicketPolicy.value === 'allow'
+      updatePayload.extra = extra
     }
 
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {

@@ -735,7 +735,71 @@ describe("admin SettingsView payment visible method controls", () => {
     wrapper.unmount();
   });
 
-  it("loads the masked Codex harvest proxy and submits a replacement URL", async () => {
+  it("submits the Codex ticket TTL and reuse policy", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_codex_ticket_ttl_seconds: 200,
+      openai_codex_ticket_reuse_expired: true,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("#codex-ticket-ttl").setValue("120");
+    await wrapper.get("#codex-ticket-reuse-expired").setValue(false);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_ttl_seconds).toBe(120);
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_reuse_expired).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("clamps the Codex ticket TTL to the 60-second minimum on submit", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_codex_ticket_ttl_seconds: 200,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("#codex-ticket-ttl").setValue("5");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_ttl_seconds).toBe(60);
+    wrapper.unmount();
+  });
+
+  it("submits the Codex ticket reuse window", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_codex_ticket_reuse_expired_max_seconds: 600,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("#codex-ticket-reuse-window").setValue("120");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_reuse_expired_max_seconds).toBe(120);
+    wrapper.unmount();
+  });
+
+  it("keeps 0 as unlimited and clamps the Codex ticket reuse window", async () => {
+    getSettings.mockResolvedValueOnce({
+      ...baseSettingsResponse,
+      openai_codex_ticket_reuse_expired_max_seconds: 600,
+    });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get("#codex-ticket-reuse-window").setValue("0");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_reuse_expired_max_seconds).toBe(0);
+
+    await wrapper.get("#codex-ticket-reuse-window").setValue("999999");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[1]?.[0].openai_codex_ticket_reuse_expired_max_seconds).toBe(86400);
+    wrapper.unmount();
+  });
+
+  it("does not expose the retired standalone Codex harvest proxy", async () => {
     getSettings.mockResolvedValueOnce({
       ...baseSettingsResponse,
       openai_codex_ticket_harvest_proxy_url: "http://user:***@old.example.com:8080",
@@ -743,14 +807,7 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     const wrapper = mountView();
     await flushPromises();
-    const input = wrapper.get<HTMLInputElement>("#codex-ticket-harvest-proxy");
-    expect(input.element.value).toBe("http://user:***@old.example.com:8080");
-    await input.setValue("socks5h://user:new-secret@new.example.com:1080");
-    await wrapper.find("form").trigger("submit.prevent");
-    await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_harvest_proxy_url)
-      .toBe("socks5h://user:new-secret@new.example.com:1080");
-    expect(updateSettings.mock.calls[0]?.[0]).not.toHaveProperty("openai_codex_ticket_harvest_proxy_configured");
+    expect(wrapper.find("#codex-ticket-harvest-proxy").exists()).toBe(false);
     wrapper.unmount();
   });
 

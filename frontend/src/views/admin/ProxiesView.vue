@@ -38,6 +38,7 @@
 
           <!-- Right: All action buttons -->
           <div class="flex flex-1 flex-wrap items-center justify-end gap-2">
+            <button class="btn btn-secondary" @click="showCodexTicketPool = true">{{ t('admin.accounts.codexTicket.poolTitle') }}</button>
             <button
               @click="loadProxies"
               :disabled="loading"
@@ -960,6 +961,7 @@
         </div>
       </template>
     </BaseDialog>
+    <CodexTicketPoolDialog :show="showCodexTicketPool" @close="showCodexTicketPool = false" />
   </AppLayout>
 </template>
 
@@ -971,6 +973,7 @@ import { adminAPI } from '@/api/admin'
 import type { Proxy, ProxyAccountSummary, ProxyProtocol, ProxyQualityCheckResult } from '@/types'
 import type { Column } from '@/components/common/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
+import CodexTicketPoolDialog from '@/components/admin/proxy/CodexTicketPoolDialog.vue'
 import TablePageLayout from '@/components/layout/TablePageLayout.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import Pagination from '@/components/common/Pagination.vue'
@@ -1067,6 +1070,7 @@ const showDeleteDialog = ref(false)
 const showBatchDeleteDialog = ref(false)
 const showExportDataDialog = ref(false)
 const showAccountsModal = ref(false)
+const showCodexTicketPool = ref(false)
 const submitting = ref(false)
 const exportingData = ref(false)
 const testingProxyIds = ref<Set<number>>(new Set())

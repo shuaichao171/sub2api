@@ -1171,15 +1171,23 @@ export interface Account {
   codex_turn_tickets?: Array<{
     model: string
     length?: number
+    expected_ticket_length?: number
+    harvest_paused?: boolean
+    harvest_enabled?: boolean
+    quota_reset_at?: string
+    harvest_resume_at?: string
     ready: boolean
     remaining_seconds: number
     blocked: boolean
     expires_at?: string
+    reusing_expired?: boolean
   }>
   // Extra fields including Codex usage, OpenAI compact capability, and model-level rate limits.
   extra?: (CodexUsageSnapshot & OpenAICompactState & {
     model_rate_limits?: Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
     antigravity_credits_overages?: Record<string, { activated_at: string; active_until: string }>
+    codex_ticket_harvest_enabled?: boolean
+    codex_ticket_harvest_models?: Record<string, boolean>
     upstream_billing_probe_enabled?: boolean
     upstream_billing_rate_sync_enabled?: boolean
     upstream_billing_probe?: UpstreamBillingProbeSnapshot

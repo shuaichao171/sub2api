@@ -710,8 +710,18 @@ const (
 	// SettingKeyOpenAICodexTicketEnabled Codex 292 打票总开关（后台可改、热更新）。
 	// 关闭：不打票、不注入 x-codex-turn-state，按原链路转发。
 	// 开启：后台打票并在业务请求中覆盖该头。
-	SettingKeyOpenAICodexTicketEnabled = "openai_codex_ticket_enabled"
+	SettingKeyOpenAICodexTicketEnabled            = "openai_codex_ticket_enabled"
+	// SettingKeyOpenAICodexTicketAllowWithoutTicket 无票时是否放行业务请求（账号级 codex_allow_without_ticket 可覆盖），后台可改、热更新。
+	SettingKeyOpenAICodexTicketAllowWithoutTicket = "openai_codex_ticket_allow_without_ticket"
+	// SettingKeyOpenAICodexTicketTTLSeconds Codex 292 票据有效期（秒），后台可改、热更新，最小 60。
+	SettingKeyOpenAICodexTicketTTLSeconds = "openai_codex_ticket_ttl_seconds"
+	// SettingKeyOpenAICodexTicketReuseExpired 票据过期后是否仍沿用上次票据，后台可改、热更新。
+	SettingKeyOpenAICodexTicketReuseExpired = "openai_codex_ticket_reuse_expired"
+	// SettingKeyOpenAICodexTicketReuseExpiredMaxSeconds 票据过期后最长复用时长（秒），
+	// 0 表示不限制；后台可改、热更新。
+	SettingKeyOpenAICodexTicketReuseExpiredMaxSeconds = "openai_codex_ticket_reuse_expired_max_seconds"
 	// SettingKeyOpenAICodexTicketHarvestProxyURL Codex 292 打票出口（socks5h/http），后台可改、热更新。
+	// 已由「代理管理 → 292 打票代理池」取代，仅作历史兼容读取。
 	SettingKeyOpenAICodexTicketHarvestProxyURL = "openai_codex_ticket_harvest_proxy_url"
 	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 已废弃：历史全局开关只作为升级迁移输入读取。
 	// 迁移后等价规则写入 SettingKeyCodexCLIOnlyWhitelist，不再参与运行时判定。

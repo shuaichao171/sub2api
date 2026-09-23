@@ -8,10 +8,11 @@ import (
 )
 
 func TestAccountResponseCodexTicketsUsesConfiguredPolicy(t *testing.T) {
-	account := &service.Account{ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth}
+	account := &service.Account{ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "tok", "plan_type": "plus"}}
 	h := &AccountHandler{cfg: &config.Config{}}
-	require.Empty(t, h.accountResponseFromService(account).CodexTurnTickets)
-	require.Empty(t, h.accountListResponseFromService(account).CodexTurnTickets)
+	require.Len(t, h.accountResponseFromService(account).CodexTurnTickets, 2)
+	require.False(t, h.accountListResponseFromService(account).CodexTurnTickets[0].HarvestEnabled)
 	h.cfg.Gateway.OpenAICodexTicket = config.OpenAICodexTicketConfig{Enabled: true, Models: []string{"configured-model"}, FailClosed: false}
 	status := h.accountListResponseFromService(account).CodexTurnTickets
 	require.Len(t, status, 1)
@@ -27,10 +28,11 @@ func TestAccountResponseCodexTicketsReadsLiveSettingsAfterRestart(t *testing.T) 
 	settings := service.NewSettingService(repo, cfg)
 	h := &AccountHandler{cfg: cfg}
 	h.SetCodexTicketSettings(settings)
-	account := &service.Account{ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeSetupToken}
+	account := &service.Account{ID: 41, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
+		Credentials: map[string]any{"access_token": "tok", "plan_type": "plus"}}
 	require.Len(t, h.accountListResponseFromService(account).CodexTurnTickets, 2)
 	require.False(t, cfg.Gateway.OpenAICodexTicket.Enabled)
 	repo.values[service.SettingKeyOpenAICodexTicketEnabled] = "false"
 	settings.InvalidateOpenAICodexTicketEnabledCache()
-	require.Empty(t, h.accountResponseFromService(account).CodexTurnTickets)
+	require.False(t, h.accountResponseFromService(account).CodexTurnTickets[0].HarvestEnabled)
 }

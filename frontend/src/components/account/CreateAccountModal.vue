@@ -67,6 +67,11 @@
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
       </div>
 
+      <CodexTicketPolicyField
+        v-if="show && form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-model="codexTicketPolicy"
+      />
+
       <!-- Platform Selection - Segmented Control Style -->
       <div>
         <label class="input-label">{{ t('admin.accounts.platform') }}</label>
@@ -3907,6 +3912,7 @@ import {
   type AuthInputMethod
 } from '@/composables/useAccountOAuth'
 import { useOpenAIOAuth } from '@/composables/useOpenAIOAuth'
+import CodexTicketPolicyField from './CodexTicketPolicyField.vue'
 import { useGeminiOAuth } from '@/composables/useGeminiOAuth'
 import { useAntigravityOAuth } from '@/composables/useAntigravityOAuth'
 import { useGrokOAuth } from '@/composables/useGrokOAuth'
@@ -4148,6 +4154,7 @@ interface TempUnschedRuleForm {
 const step = ref(1)
 const submitting = ref(false)
 const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account'>('oauth-based') // UI selection for account category
+const codexTicketPolicy = ref<'inherit' | 'allow' | 'deny'>('inherit')
 const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-token'
 const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
@@ -5421,6 +5428,11 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
 
   const extra: Record<string, unknown> = { ...(base || {}) }
+  if (accountCategory.value === 'oauth-based' && codexTicketPolicy.value !== 'inherit') {
+    extra.codex_allow_without_ticket = codexTicketPolicy.value === 'allow'
+  } else {
+    delete extra.codex_allow_without_ticket
+  }
   if (accountCategory.value === 'oauth-based') {
     extra.openai_oauth_responses_websockets_v2_mode = openaiOAuthResponsesWebSocketV2Mode.value
     extra.openai_oauth_responses_websockets_v2_enabled = isOpenAIWSModeEnabled(openaiOAuthResponsesWebSocketV2Mode.value)

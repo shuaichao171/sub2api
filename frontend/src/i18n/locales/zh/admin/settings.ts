@@ -539,11 +539,14 @@ export default {
         codexTicketEnabled: '292 打票',
         codexTicketEnabledDesc:
           '关闭后不打票、不注入 x-codex-turn-state，按原链路转发。开启后后台打票，并在业务请求中覆盖该头。',
-        codexTicketHarvestProxy: '292 打票代理',
-        codexTicketHarvestProxyDesc:
-          '仅在门票功能开启时用于打票，保存后后续探测会使用新代理，无需重启。日常业务仍走账号自己的住宅代理。填写完整代理 URL（http 或 socks5h，含用户名和密码）。代理服务商需自行负责出口 IP 轮换。留空并保存表示不改已保存的值；输入 none 并保存表示清除已保存的代理（清除后若配置文件也未配置，将停止打票）。',
-        codexTicketHarvestProxyPlaceholder: "http://user:pass{'@'}proxy.example.com:1080",
-        codexTicketHarvestProxyConfigured: '已配置（密码已隐藏）。要更换请整段粘贴新的代理 URL。',
+        codexTicketAllowWithoutTicket: '默认允许无票请求',
+        codexTicketAllowWithoutTicketDesc: '账号未单独设置时使用此策略；关闭表示需要有效票据，账号可以单独设置例外。',
+        codexTicketTTL: '票据过期时间（秒）',
+        codexTicketTTLDesc: '打票成功后票据的有效期，默认 200 秒，最小 60 秒；会在过期前自动重新打票。',
+        codexTicketReuseExpired: '过期仍沿用上次票据',
+        codexTicketReuseExpiredDesc: '开启后，票据过期但新票尚未打到时继续沿用上次票据；账号票据状态会标注为已过期沿用。',
+        codexTicketReuseExpiredMax: '过期后最长复用时长（秒）',
+        codexTicketReuseExpiredMaxDesc: '票据过期后最多继续沿用多久，默认 600 秒，0 表示不限制；超过后按无票处理。仅在「过期仍沿用上次票据」开启时生效。',
         codexClientRestrictionTitle: 'Codex 客户端限制',
         codexHardeningDesc:
           '仅对已开启「仅允许 Codex 官方客户端」的 OpenAI OAuth 账号生效（全局）。在 User-Agent/Originator 之外，用版本区间、引擎指纹门与黑/白名单巩固判定。',

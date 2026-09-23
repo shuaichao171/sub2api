@@ -897,6 +897,44 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	} else if s != nil && s.cfg != nil {
 		result.OpenAICodexTicketEnabled = s.cfg.Gateway.OpenAICodexTicket.Enabled
 	}
+	if v, ok := settings[SettingKeyOpenAICodexTicketAllowWithoutTicket]; ok && v != "" {
+		result.OpenAICodexTicketAllowWithoutTicket = v == "true"
+	} else if s != nil && s.cfg != nil {
+		result.OpenAICodexTicketAllowWithoutTicket = !s.cfg.Gateway.OpenAICodexTicket.FailClosed
+	}
+	if v, ok := settings[SettingKeyOpenAICodexTicketTTLSeconds]; ok && v != "" {
+		if seconds, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			result.OpenAICodexTicketTTLSeconds = normalizeOpenAICodexTicketTTLSeconds(seconds)
+		} else if s != nil && s.cfg != nil {
+			result.OpenAICodexTicketTTLSeconds = normalizeOpenAICodexTicketTTLSeconds(s.cfg.Gateway.OpenAICodexTicket.TTLSeconds)
+		} else {
+			result.OpenAICodexTicketTTLSeconds = openAICodexTicketDefaultTTLSeconds
+		}
+	} else if s != nil && s.cfg != nil {
+		result.OpenAICodexTicketTTLSeconds = normalizeOpenAICodexTicketTTLSeconds(s.cfg.Gateway.OpenAICodexTicket.TTLSeconds)
+	} else {
+		result.OpenAICodexTicketTTLSeconds = openAICodexTicketDefaultTTLSeconds
+	}
+	if v, ok := settings[SettingKeyOpenAICodexTicketReuseExpired]; ok && v != "" {
+		result.OpenAICodexTicketReuseExpired = v == "true"
+	} else if s != nil && s.cfg != nil {
+		result.OpenAICodexTicketReuseExpired = s.cfg.Gateway.OpenAICodexTicket.ReuseExpired
+	} else {
+		result.OpenAICodexTicketReuseExpired = true
+	}
+	if v, ok := settings[SettingKeyOpenAICodexTicketReuseExpiredMaxSeconds]; ok && v != "" {
+		if seconds, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && seconds >= 0 {
+			result.OpenAICodexTicketReuseExpiredMaxSeconds = normalizeOpenAICodexTicketReuseWindowSeconds(seconds)
+		} else if s != nil && s.cfg != nil {
+			result.OpenAICodexTicketReuseExpiredMaxSeconds = normalizeOpenAICodexTicketReuseWindowSeconds(s.cfg.Gateway.OpenAICodexTicket.ReuseExpiredMaxSeconds)
+		} else {
+			result.OpenAICodexTicketReuseExpiredMaxSeconds = openAICodexTicketDefaultReuseWindowSeconds
+		}
+	} else if s != nil && s.cfg != nil {
+		result.OpenAICodexTicketReuseExpiredMaxSeconds = normalizeOpenAICodexTicketReuseWindowSeconds(s.cfg.Gateway.OpenAICodexTicket.ReuseExpiredMaxSeconds)
+	} else {
+		result.OpenAICodexTicketReuseExpiredMaxSeconds = openAICodexTicketDefaultReuseWindowSeconds
+	}
 	result.OpenAICodexTicketHarvestProxyURL = strings.TrimSpace(settings[SettingKeyOpenAICodexTicketHarvestProxyURL])
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]

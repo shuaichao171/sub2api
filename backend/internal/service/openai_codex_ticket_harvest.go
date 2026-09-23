@@ -82,7 +82,8 @@ func (s *OpenAIGatewayService) chooseCodexTicketProxy(ctx context.Context, accou
 	_, _ = h.Write([]byte(key))
 	seed := uint64(h.Sum32())
 	value, _ := s.openaiCodexTicketProxyTurns.LoadOrStore(key, &atomic.Uint64{})
-	turn := value.(*atomic.Uint64).Add(1) - 1
+	counter, _ := value.(*atomic.Uint64)
+	turn := counter.Add(1) - 1
 	selected := proxies[(seed+turn)%uint64(len(proxies))]
 	return selected.URL(), &selected, nil
 }

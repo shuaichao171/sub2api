@@ -271,13 +271,6 @@ func (t *openAICodexTicket) valid(now time.Time, targetLen int) bool {
 	return t.usable(now, targetLen, false, 0)
 }
 
-func (t *openAICodexTicket) needsRefresh(now time.Time, refreshBefore time.Duration) bool {
-	if t == nil || t.ExpiresAt.IsZero() {
-		return true
-	}
-	return !t.ExpiresAt.After(now.Add(refreshBefore))
-}
-
 func (s *OpenAIGatewayService) lookupOpenAICodexTicket(account *Account, model string) *openAICodexTicket {
 	if s == nil || account == nil || account.ID <= 0 {
 		return nil

@@ -710,7 +710,7 @@ const (
 	// SettingKeyOpenAICodexTicketEnabled Codex 292 打票总开关（后台可改、热更新）。
 	// 关闭：不打票、不注入 x-codex-turn-state，按原链路转发。
 	// 开启：后台打票并在业务请求中覆盖该头。
-	SettingKeyOpenAICodexTicketEnabled            = "openai_codex_ticket_enabled"
+	SettingKeyOpenAICodexTicketEnabled = "openai_codex_ticket_enabled"
 	// SettingKeyOpenAICodexTicketAllowWithoutTicket 无票时是否放行业务请求（账号级 codex_allow_without_ticket 可覆盖），后台可改、热更新。
 	SettingKeyOpenAICodexTicketAllowWithoutTicket = "openai_codex_ticket_allow_without_ticket"
 	// SettingKeyOpenAICodexTicketTTLSeconds Codex 292 票据有效期（秒），后台可改、热更新，最小 60。

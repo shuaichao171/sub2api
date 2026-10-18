@@ -596,9 +596,12 @@ func TestOpenAICodexTicketStatuses_StopsReusingAfterMaxWindow(t *testing.T) {
 // /responses/compact 的出站模型被 Forward 改写为 gateway.openai_compact_model
 // （默认非空），门票门控必须按该出站模型判定。否则对门控模型发 compact 请求时，
 // 所有无票账号都会被 fail_closed 误判为不可调度，而这些请求实际不需要票。
+// 注意：gpt-5.5 自 2026-10-14 起在 ChatGPT 订阅号上退役（openai_model_retirement.go），
+// 订阅号的 compact 兜底不再改写出站模型，因此「改写后不拦」场景用未退役的 gpt-5.4，
+// 退役行为在末尾单独断言。
 func TestOpenAICodexTicketGate_CompactRequestUsesForwardOutboundModel(t *testing.T) {
 	svc := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
-		OpenAICompactModel: "gpt-5.5",
+		OpenAICompactModel: "gpt-5.4",
 		OpenAICodexTicket: config.OpenAICodexTicketConfig{
 			Enabled:      true,
 			TargetLength: 292,
@@ -611,14 +614,29 @@ func TestOpenAICodexTicketGate_CompactRequestUsesForwardOutboundModel(t *testing
 
 	// 出站模型预测必须与 Forward 的解析链一致。
 	require.Equal(t, "gpt-6-astra", svc.openAICodexTicketOutboundModel(account, "gpt-6-astra", false))
-	require.Equal(t, "gpt-5.5", svc.openAICodexTicketOutboundModel(account, "gpt-6-astra", true))
+	require.Equal(t, "gpt-5.4", svc.openAICodexTicketOutboundModel(account, "gpt-6-astra", true))
 
 	// 普通请求：出站仍是门控模型且无票 → fail_closed 必须拦号。
 	require.True(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", false))
 
-	// compact 请求：出站已被改写成非门控的 gpt-5.5 → 不得拦号。
+	// compact 请求：出站已被改写成非门控的 gpt-5.4 → 不得拦号。
 	require.False(t, svc.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", true))
 
 	// 回归锚点：按客户端原始模型判定（旧实现的口径）在 compact 下必然误拦。
 	require.True(t, svc.openAICodexTicketBlocksAccount(account, canonicalOpenAIAccountSchedulingModel(account, "gpt-6-astra")))
+
+	// 上游 2026-10-14 起 gpt-5.5 在 ChatGPT 订阅号退役：compact 兜底被禁用，
+	// 出站保持门控模型且无票 → fail_closed 必须拦号（与 Forward 实际出站一致）。
+	retired := &OpenAIGatewayService{cfg: &config.Config{Gateway: config.GatewayConfig{
+		OpenAICompactModel: "gpt-5.5",
+		OpenAICodexTicket: config.OpenAICodexTicketConfig{
+			Enabled:      true,
+			TargetLength: 292,
+			TTLSeconds:   3600,
+			FailClosed:   true,
+			Models:       []string{"gpt-6-astra"},
+		},
+	}}}
+	require.Equal(t, "gpt-6-astra", retired.openAICodexTicketOutboundModel(account, "gpt-6-astra", true))
+	require.True(t, retired.isOpenAIAccountRequestRuntimeBlocked(account, "gpt-6-astra", true))
 }

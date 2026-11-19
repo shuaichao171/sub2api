@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -363,7 +364,7 @@ func NewOpenAIGatewayHandler(
 	opsService *service.OpsService,
 	cfg *config.Config,
 ) *OpenAIGatewayHandler {
-	pingInterval := time.Duration(0)
+	pingInterval := defaultPingInterval
 	maxAccountSwitches := 3
 	if cfg != nil {
 		pingInterval = time.Duration(cfg.Concurrency.PingInterval) * time.Second
@@ -424,20 +425,23 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// Read request body
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, reqLog, err) {
 			return
 		}
-		if maxErr, ok := extractMaxBytesError(err); ok {
-			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
-			return
-		}
-		logRequestBodyReadFailure(reqLog, c.Request, err)
-		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		status, message := requestBodyReadFailure(reqLog, c.Request, err)
+		h.errorResponse(c, status, "invalid_request_error", message)
 		return
 	}
 
 	if len(body) == 0 {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		return
+	}
+
+	// Reject invalid UTF-8 before JSON transformation so malformed bytes do not
+	// become retryable upstream errors.
+	if !utf8.Valid(body) {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body must be valid UTF-8 JSON. Send UTF-8 encoded bytes.")
 		return
 	}
 
@@ -484,6 +488,12 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	} else if changed {
 		body = cappedBody
+	}
+	if normalizedBody, changed := normalizeCodexUntrustedContext(body); changed {
+		body = normalizedBody
+		reqLog.Info("openai.codex_untrusted_context_normalized",
+			zap.String("normalization", "call_output_to_user_message"),
+		)
 	}
 	if normalizedBody, changed := normalizeCodexAutomationBootstrap(body); changed {
 		body = normalizedBody
@@ -1210,14 +1220,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, reqLog, err) {
 			return
 		}
-		if maxErr, ok := extractMaxBytesError(err); ok {
-			h.anthropicErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
-			return
-		}
-		h.anthropicErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		status, message := requestBodyReadFailure(reqLog, c.Request, err)
+		h.anthropicErrorResponse(c, status, "invalid_request_error", message)
 		return
 	}
 	if len(body) == 0 {
@@ -1406,7 +1413,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defaultMappedModel := strings.TrimSpace(effectiveMappedModel)
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
-		writerSizeBeforeForward := c.Writer.Size()
+		writerSizeBeforeForward := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1494,10 +1501,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						)
 						return
 					}
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if !openAIForwardMayFailover(c, writerSizeBeforeForward, failoverErr) {
 						h.gatewayService.ObserveOpenAIAccountHealthFailure(c.Request.Context(), account, err)
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
+					}
+					// Only keepalive bytes were written, so failover may continue, but
+					// every later error must be written as an SSE event.
+					if c.Writer.Written() {
+						streamStarted = true
 					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
@@ -1656,16 +1668,24 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 		h.anthropicStreamingAwareError(c, status, "api_error", failoverErr.ClientMessage, streamStarted)
 		return
 	}
+	// A failed or error frame that triggered the failover no longer reaches the
+	// client in-band, so its error passthrough rule is applied here instead.
+	if status, errType, msg, ok := service.ApplyOpenAIStreamFailedFrameRule(c, failoverErr); ok {
+		h.anthropicStreamingAwareError(c, status, errType, msg, streamStarted)
+		return
+	}
 	status, errType, errMsg := h.mapUpstreamError(failoverErr.StatusCode)
 	h.anthropicStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
 
 // ensureAnthropicErrorResponse writes a fallback Anthropic error if no response was written.
 func (h *OpenAIGatewayHandler) ensureAnthropicErrorResponse(c *gin.Context, streamStarted bool) bool {
-	if c == nil || c.Writer == nil || c.Writer.Written() {
+	// Keepalive pings alone do not count as a written response, but they do
+	// commit the response as SSE, so the fallback must then be an SSE event.
+	if c == nil || c.Writer == nil || service.OpenAICompactKeepaliveAdjustedWrittenSize(c) >= 0 {
 		return false
 	}
-	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
+	h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted || c.Writer.Written())
 	return true
 }
 
@@ -1722,11 +1742,23 @@ func normalizeCodexAutomationBootstrap(body []byte) ([]byte, bool) {
 // mayContainCodexCallOutputCandidate is a necessary condition for a bootstrap
 // candidate, checked before the full uniqueness scan and decode. Its type and
 // tool name are JSON strings, which appear literally unless a \u escape spells
-// their letters; without either, normalization cannot change the body.
+// their letters; without either, normalization cannot change the body. Escapes
+// that real clients emit (control characters, HTML-safe and non-ASCII runes)
+// cannot spell those letters and must not force the full decode.
+//
+// Tool declarations carry the same names, so a literal hit is confirmed by a
+// zero-copy scan for an input item of type function_call_output whose name
+// starts with one of toolNames. The full path rejects bodies with duplicate
+// members, and without duplicates the scan reads the same values as the
+// decoder.
 func mayContainCodexCallOutputCandidate(body []byte, toolNames ...string) bool {
-	if bytes.Contains(body, []byte(`\u`)) {
-		return true
+	if !service.JSONMayEscapePlainASCII(body) && !containsCodexCallOutputLiterals(body, toolNames) {
+		return false
 	}
+	return service.ResponsesInputHasFunctionCallOutputNamed(body, toolNames...)
+}
+
+func containsCodexCallOutputLiterals(body []byte, toolNames []string) bool {
 	if !bytes.Contains(body, []byte("function_call_output")) {
 		return false
 	}
@@ -3589,6 +3621,17 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 	if failoverErr.IsOpenAIRequestBodyTooLarge() {
+		// An operator-configured passthrough rule wins over the built-in body
+		// limit mapping below. Failover on 413 exists because different
+		// accounts can front proxies with different body limits, so the
+		// switching itself is left intact; what the rule controls is the
+		// client-facing response once failover is exhausted. Without this
+		// check a 413 rule can never match on the native /responses path,
+		// because the body-limit branch returns before the generic rule
+		// lookup further down.
+		if h.applyOpenAIFailoverPassthroughRule(c, failoverErr.StatusCode, failoverErr.ResponseBody, streamStarted) {
+			return
+		}
 		service.SetOpsUpstreamError(c, http.StatusRequestEntityTooLarge, service.OpenAIRequestBodyTooLargeClientMessage, "")
 		h.handleStreamingAwareError(
 			c,
@@ -3648,27 +3691,8 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	}
 
 	// 先检查透传规则
-	if h.errorPassthroughService != nil && len(responseBody) > 0 {
-		if rule := h.errorPassthroughService.MatchRule("openai", statusCode, responseBody); rule != nil {
-			// 确定响应状态码
-			respCode := statusCode
-			if !rule.PassthroughCode && rule.ResponseCode != nil {
-				respCode = *rule.ResponseCode
-			}
-
-			// 确定响应消息
-			msg := service.ExtractUpstreamErrorMessage(responseBody)
-			if !rule.PassthroughBody && rule.CustomMessage != nil {
-				msg = *rule.CustomMessage
-			}
-
-			if rule.SkipMonitoring {
-				c.Set(service.OpsSkipPassthroughKey, true)
-			}
-
-			h.handleStreamingAwareError(c, respCode, "upstream_error", msg, streamStarted)
-			return
-		}
+	if h.applyOpenAIFailoverPassthroughRule(c, statusCode, responseBody, streamStarted) {
+		return
 	}
 
 	// 记录原始上游状态码，以便 ops 错误日志捕获真实的上游错误
@@ -3678,6 +3702,45 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// 使用默认的错误映射
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
+}
+
+// applyOpenAIFailoverPassthroughRule applies a configured error passthrough
+// rule to an exhausted OpenAI failover. It reports whether a rule matched and
+// the client response has been written; callers must return when it does.
+//
+// Rules are operator opt-in overrides, so they take precedence over the
+// gateway's built-in mapping for the same upstream status, including the
+// body-too-large branch that otherwise returns a fixed 413.
+func (h *OpenAIGatewayHandler) applyOpenAIFailoverPassthroughRule(
+	c *gin.Context,
+	statusCode int,
+	responseBody []byte,
+	streamStarted bool,
+) bool {
+	if h.errorPassthroughService == nil || statusCode <= 0 || len(responseBody) == 0 {
+		return false
+	}
+	rule := h.errorPassthroughService.MatchRule("openai", statusCode, responseBody)
+	if rule == nil {
+		return false
+	}
+
+	respCode := statusCode
+	if !rule.PassthroughCode && rule.ResponseCode != nil {
+		respCode = *rule.ResponseCode
+	}
+
+	msg := service.ExtractUpstreamErrorMessage(responseBody)
+	if !rule.PassthroughBody && rule.CustomMessage != nil {
+		msg = *rule.CustomMessage
+	}
+
+	if rule.SkipMonitoring {
+		c.Set(service.OpsSkipPassthroughKey, true)
+	}
+
+	h.handleStreamingAwareError(c, respCode, "upstream_error", msg, streamStarted)
+	return true
 }
 
 func credentialFailoverClientResponse(failoverErr *service.UpstreamFailoverError) (int, string) {
